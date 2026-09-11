@@ -31,7 +31,7 @@ BANNER = r"""
 ╔══════════════════════════════════════════════════════════╗
 ║            N E T R U L E   C O M P I L E R             ║
 ║   Lexer → Parser → Semantic → IR → Optimize → Execute   ║
-║   VIT Vellore · Compiler Design Lab · Phase 1           ║
+║   VIT Vellore · Compiler Design Lab                     ║
 ╚══════════════════════════════════════════════════════════╝
 """
 

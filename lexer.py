@@ -4,13 +4,12 @@
 #
 # Token rules:
 #   KEYWORDS     — matched case-sensitively (POLICY, RULE, IF, AND, … TCP, UDP, ICMP)
-#   FIELDS       — matched case-insensitively (source_ip, destination_port, …)
+#   FIELDS       — matched only by their exact canonical spelling (source_ip, destination_port, …)
 #   IDENT        — [a-zA-Z_][a-zA-Z0-9_]* that is not a keyword/field
 #   INTEGER      — one or more digits, no leading dot, no trailing dot
 #   IP_ADDRESS   — four decimal octets separated by dots (0-255 each)
 #                  Lexed greedily: "192.168.1.10" is one IP_ADDRESS token,
 #                  not INTEGER DOT INTEGER DOT …
-#   STRING       — double-quoted, supports \" and \\ escapes; no newlines inside
 #   OPERATORS    — ==, !=, <, >, <=, >=
 #   PUNCTUATION  — { } ( ) ;
 #   COMMENTS     — # to end of line, silently discarded
@@ -23,7 +22,7 @@
 
 from tokens import (
     KEYWORDS, BUILTIN_FIELDS,
-    TK_INTEGER, TK_IP_ADDRESS, TK_STRING, TK_IDENT,
+    TK_INTEGER, TK_IP_ADDRESS, TK_IDENT,
     TK_EQ, TK_NEQ, TK_LT, TK_GT, TK_LTE, TK_GTE,
     TK_LBRACE, TK_RBRACE, TK_LPAREN, TK_RPAREN, TK_SEMI, TK_EOF,
 )
@@ -100,10 +99,9 @@ class Lexer:
         if word in KEYWORDS:
             return Token(KEYWORDS[word], word, line, col)
 
-        # 2. Case-insensitive built-in field match (source_ip, DESTINATION_PORT …)
-        lower = word.lower()
-        if lower in BUILTIN_FIELDS:
-            return Token(BUILTIN_FIELDS[lower], lower, line, col)
+        # 2. Exact-case built-in field match only (source_ip, destination_port, protocol…)
+        if word in BUILTIN_FIELDS:
+            return Token(BUILTIN_FIELDS[word], word, line, col)
 
         # 3. Generic identifier (policy/rule names)
         return Token(TK_IDENT, word, line, col)
@@ -111,8 +109,9 @@ class Lexer:
     def _try_read_ip(self, first_digits: str, start_line: int, start_col: int):
         """
         After reading a run of digits, check if this is an IP address
-        (digits.digits.digits.digits).  Returns Token or None.
-        If None, caller should emit the digits as an INTEGER.
+        (digits.digits.digits.digits).  Returns a Token for a valid IP,
+        None if it is not an IP candidate, or False if it is an invalid IPv4
+        literal that was already diagnosed as a lexical error.
         """
         saved_pos  = self.pos
         saved_line = self.line
@@ -146,7 +145,8 @@ class Lexer:
                     raise ValueError
         except ValueError:
             self._err(f"Invalid IP address: {ip_str!r}", start_line, start_col)
-            # Return as IP_ADDRESS token anyway — semantic analysis is not lexer's job
+            # Invalid IPv4 literals must not be emitted as valid IP_ADDRESS tokens.
+            return False
         return Token(TK_IP_ADDRESS, ip_str, start_line, start_col)
 
     def _read_number_or_ip(self):
@@ -159,44 +159,24 @@ class Lexer:
 
         # Look ahead: if next char is '.', try to parse as IP
         if self._cur() == '.':
-            ip_tok = self._try_read_ip(digits, line, col)
-            if ip_tok:
-                return ip_tok
-            # Trailing dot: e.g. "80." — emit error, return INTEGER
+            ip_result = self._try_read_ip(digits, line, col)
+            if ip_result is False:
+                return None
+            if ip_result:
+                return ip_result
+
+            # This is a malformed dotted numeric literal (e.g. 80., 1.2.3):
+            # consume the whole malformed literal and emit a precise lexer error.
+            while self._cur() and (self._cur().isdigit() or self._cur() == '.'):
+                self._advance()
+            malformed = self.source[start:self.pos]
             self._err(
-                f"Malformed numeric literal {digits!r}: "
-                f"a FLOAT is not supported; did you mean an IP address?",
+                f"Malformed numeric literal {malformed!r}: dotted numeric literals "
+                f"must be valid IPv4 addresses in the form a.b.c.d with octets 0-255",
                 line, col
             )
+            return None
         return Token(TK_INTEGER, digits, line, col)
-
-    def _read_string(self):
-        """Read a double-quoted string literal. Supports \\" and \\\\."""
-        line, col = self._here()
-        self._advance()  # consume opening "
-        chars = []
-        while True:
-            ch = self._cur()
-            if ch is None or ch == '\n':
-                self._err("Unterminated string literal", line, col)
-                break
-            if ch == '\\':
-                self._advance()
-                esc = self._cur()
-                if esc == '"':
-                    chars.append('"'); self._advance()
-                elif esc == '\\':
-                    chars.append('\\'); self._advance()
-                else:
-                    chars.append('\\')
-                    if esc:
-                        chars.append(esc); self._advance()
-            elif ch == '"':
-                self._advance()  # consume closing "
-                break
-            else:
-                chars.append(ch); self._advance()
-        return Token(TK_STRING, ''.join(chars), line, col)
 
     def _skip_comment(self):
         """Skip from # to end of line."""
@@ -234,12 +214,15 @@ class Lexer:
 
             # number or IP
             if ch.isdigit():
-                self.tokens.append(self._read_number_or_ip())
+                tok = self._read_number_or_ip()
+                if tok is not None:
+                    self.tokens.append(tok)
                 continue
 
-            # string literal
+            # quoted text is invalid in this grammar; keep it as a lexical error
             if ch == '"':
-                self.tokens.append(self._read_string())
+                self._err(f"Unexpected character: {ch!r}", line, col)
+                self._advance()
                 continue
 
             # two-char operators (must precede single-char)

@@ -29,7 +29,6 @@ KW_PROTO    = 'protocol'
 # ── Literals ─────────────────────────────────────────────────────────────────
 TK_INTEGER      = 'INTEGER'
 TK_IP_ADDRESS   = 'IP_ADDRESS'
-TK_STRING       = 'STRING'
 
 # ── Identifiers ───────────────────────────────────────────────────────────────
 TK_IDENT        = 'IDENT'
